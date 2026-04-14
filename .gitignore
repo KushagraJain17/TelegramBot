@@ -1,0 +1,6 @@
+.env
+__pycache__/
+insta_session
+*.pyc
+.idea/
+.vscode/

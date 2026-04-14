@@ -1,0 +1,16 @@
+services:
+  - type: worker
+    name: instagram-telegram-bot
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: INSTA_USER
+        sync: false
+      - key: INSTA_PASS
+        sync: false
+      - key: MAX_FILESIZE_MB
+        value: "50"
+    autoDeploy: true
