@@ -1,3 +1,5 @@
+import os
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -33,15 +35,36 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if INSTAGRAM_PATTERN.search(text):
         await handle_instagram(update, context)
 
+# --- WEB SERVER FOR RENDER FREE TIER ---
+async def head(request):
+    return web.Response(text="Bot is running!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get("/", head)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", int(os.environ.get("PORT", 10000)))
+    await site.start()
+    print(f"🌐 Web server started on port {os.environ.get('PORT', 10000)}")
+
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("❌ ERROR: 'BOT_TOKEN' environment variable is missing!")
         exit(1)
 
+    # Initialize Telegram Bot
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+
+    # Run both the web server and the bot
+    import asyncio
+    loop = asyncio.get_event_loop()
+    
+    # Start web server
+    loop.create_task(start_web_server())
 
     print("🤖 Instagram Bot is running…")
     app.run_polling()
