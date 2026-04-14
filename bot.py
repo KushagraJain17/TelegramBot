@@ -59,12 +59,13 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Run both the web server and the bot
-    import asyncio
-    loop = asyncio.get_event_loop()
-    
-    # Start web server
-    loop.create_task(start_web_server())
+    # This function starts the web server once the bot's event loop is ready
+    async def post_init(application):
+        import asyncio
+        asyncio.create_task(start_web_server())
+        print("🤖 Instagram Bot is running…")
 
-    print("🤖 Instagram Bot is running…")
+    app.post_init = post_init
+
+    # Run the bot (this handles the event loop correctly)
     app.run_polling()
