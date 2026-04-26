@@ -27,6 +27,7 @@ _L = instaloader.Instaloader(
     compress_json=False,
     quiet=True,
     max_connection_attempts=1,
+    iphone_support=False,
 )
 
 SESSION_FILE = "insta_session"
@@ -84,8 +85,8 @@ async def _fetch_and_download(shortcode: str) -> list[dict]:
     # Download to memory concurrently
     async def _dl(session, item):
         try:
-            # Add user-agent header just in case, but no cookies for CDN
-            headers = {"User-Agent": "Mozilla/5.0"}
+            # Add user-agent header to match instaloader
+            headers = {"User-Agent": _L.context.user_agent}
             async with session.get(item["url"], headers=headers) as resp:
                 if resp.status == 200:
                     data = await resp.read()
