@@ -1,4 +1,4 @@
-# Instagram Telegram Bot 📸🤖
+# Instagram Downloader Bot 📸🤖
 
 A simple, optimized Telegram bot that downloads Instagram Reels, Posts, and Carousels directly to your chat.
 
