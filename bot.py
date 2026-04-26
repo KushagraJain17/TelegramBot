@@ -53,19 +53,19 @@ if __name__ == "__main__":
         print("❌ ERROR: 'BOT_TOKEN' environment variable is missing!")
         exit(1)
 
+    # This function starts the web server once the bot's event loop is ready
+    async def post_init(application):
+        if os.environ.get("RENDER"):
+            import asyncio
+            asyncio.create_task(start_web_server())
+            print("🌐 Web server deployment detected (Render).")
+        print("🤖 Instagram Bot is running…")
+
     # Initialize Telegram Bot
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # This function starts the web server once the bot's event loop is ready
-    async def post_init(application):
-        import asyncio
-        asyncio.create_task(start_web_server())
-        print("🤖 Instagram Bot is running…")
-
-    app.post_init = post_init
 
     # Run the bot (this handles the event loop correctly)
     app.run_polling()

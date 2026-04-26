@@ -1,13 +1,11 @@
 """
-instagram.py — Fast Instagram downloader (Optimized).
+instagram.py — Fast Instagram downloader (In-Memory).
 """
 
 import asyncio
-import logging
+import io
 import os
 import re
-import shutil
-import tempfile
 
 import aiohttp
 import instaloader
@@ -16,30 +14,8 @@ from telegram.ext import ContextTypes
 
 from config import INSTAGRAM_PATTERN, MAX_VIDEO_SIZE, INSTA_USER, INSTA_PASS
 
-# ── Constants ─────────────────────────────────────────────────────────────────
-
-_CAPTION_LIMIT  = 1024
-_UPLOAD_TIMEOUT = 120
-_MAX_ITEMS      = 10
-
-_DL_TIMEOUT = aiohttp.ClientTimeout(
-    total=25,
-    sock_connect=10,
-    sock_read=20
-)
-
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.instagram.com/",
-}
-
+import logging
 logging.getLogger("instaloader").setLevel(logging.CRITICAL)
-
-# ── Instaloader Setup ─────────────────────────────────────────────────────────
 
 _L = instaloader.Instaloader(
     download_pictures=False,
@@ -50,15 +26,22 @@ _L = instaloader.Instaloader(
     save_metadata=False,
     compress_json=False,
     quiet=True,
-    request_timeout=10,
     max_connection_attempts=1,
 )
-
-_L.context._session.headers.update(_HEADERS)
 
 SESSION_FILE = "insta_session"
 
 def _setup_session():
+    # If base64 session is provided via Env Var, write it to file to authenticate
+    session_64 = os.environ.get("INSTA_SESSION64")
+    if session_64:
+        import base64
+        try:
+            with open(SESSION_FILE, "wb") as f:
+                f.write(base64.b64decode(session_64))
+        except Exception as e:
+            print(f"❌ Failed to decode INSTA_SESSION64: {e}")
+
     if os.path.exists(SESSION_FILE):
         try:
             _L.load_session_from_file(INSTA_USER or "bot_user", filename=SESSION_FILE)
@@ -75,13 +58,7 @@ def _setup_session():
 
 _setup_session()
 
-def _get_cookies():
-    try:
-        return _L.context._session.cookies.get_dict()
-    except Exception:
-        return {}
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Fetch and Download ────────────────────────────────────────────────────────
 
 def _extract_shortcode(url: str) -> str:
     m = re.search(r"/(?:p|reel|reels|tv)/([\w-]+)", url)
@@ -89,123 +66,41 @@ def _extract_shortcode(url: str) -> str:
         raise ValueError(f"Cannot parse URL: {url}")
     return m.group(1)
 
-def _make_caption(raw: str) -> str:
-    return raw[:_CAPTION_LIMIT] if raw else ""
-
-# ── URL Collector ─────────────────────────────────────────────────────────────
-
-def _collect_urls(shortcode: str) -> list[dict]:
-    post = instaloader.Post.from_shortcode(_L.context, shortcode)
-
-    caption = post.caption or ""
-
+async def _fetch_and_download(shortcode: str) -> list[dict]:
+    # Run instaloader blocking call in a background thread
+    post = await asyncio.to_thread(instaloader.Post.from_shortcode, _L.context, shortcode)
+    
+    nodes = list(post.get_sidecar_nodes())[:10] if post.typename == "GraphSidecar" else [post]
+    caption = (post.caption or "")[:1024]
+    
     items = []
-
-    if post.typename == "GraphSidecar":
-        for i, node in enumerate(post.get_sidecar_nodes()):
-            if i >= _MAX_ITEMS:
-                break
-
-            items.append({
-                "type": "video" if node.is_video else "photo",
-                "url": node.video_url if node.is_video else node.display_url,
-                "caption": caption if i == 0 else "",
-            })
-    else:
+    for i, n in enumerate(nodes):
         items.append({
-            "type": "video" if post.is_video else "photo",
-            "url": post.video_url if post.is_video else post.url,
-            "caption": caption,
-            "duration": getattr(post, "video_duration", None),
+            "type": "video" if n.is_video else "photo",
+            "url": n.video_url if n.is_video else (n.display_url if hasattr(n, 'display_url') else n.url),
+            "caption": caption if i == 0 else ""
         })
 
-    return items
-
-# ── Optimized Downloader ─────────────────────────────────────────────────────
-
-async def _download_file(session: aiohttp.ClientSession, url: str, path: str) -> bool:
-    cookies = _get_cookies()
-
-    for attempt in range(3):
+    # Download to memory concurrently
+    async def _dl(session, item):
         try:
-            async with session.get(url, headers=_HEADERS, cookies=cookies) as resp:
-
-                if resp.status != 200:
-                    if resp.status == 403:
-                        await asyncio.sleep(0.8 * (attempt + 1))
-                        continue
-                    return False
-
-                size = 0
-                with open(path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(131072):
-                        size += len(chunk)
-                        f.write(chunk)
-
-                return size > 0
-
+            # Add user-agent header just in case, but no cookies for CDN
+            headers = {"User-Agent": "Mozilla/5.0"}
+            async with session.get(item["url"], headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    item["bytes"] = io.BytesIO(data)
+                    item["size"] = len(data)
         except Exception:
-            if attempt == 2:
-                return False
+            pass
+        return item
 
-    return False
-
-# ── Concurrent Downloader ─────────────────────────────────────────────────────
-
-async def _download_all(url_items: list[dict], target_dir: str) -> list[dict]:
-
-    connector = aiohttp.TCPConnector(
-        limit=8,
-        ttl_dns_cache=300,
-        enable_cleanup_closed=True
-    )
-
-    async with aiohttp.ClientSession(
-        connector=connector,
-        timeout=_DL_TIMEOUT
-    ) as session:
-
-        tasks = []
-        paths = []
-
-        for i, item in enumerate(url_items):
-            ext = ".mp4" if item["type"] == "video" else ".jpg"
-            path = os.path.join(target_dir, f"item_{i}{ext}")
-
-            paths.append(path)
-            tasks.append(_download_file(session, item["url"], path))
-
-        results = await asyncio.gather(*tasks)
-
-    output = []
-    for item, path, ok in zip(url_items, paths, results):
-        if ok:
-            output.append({
-                **item,
-                "path": path,
-                "size": os.path.getsize(path),
-            })
-
-    return output
-
-# ── Main Fetcher ─────────────────────────────────────────────────────────────
-
-async def _fetch_post(shortcode: str, tmp_dir: str) -> list[dict]:
-    target_dir = os.path.join(tmp_dir, shortcode)
-    os.makedirs(target_dir, exist_ok=True)
-
-    loop = asyncio.get_running_loop()
-    url_items = await loop.run_in_executor(None, _collect_urls, shortcode)
-
-    if not url_items:
-        raise ValueError("No media found in this post.")
-
-    results = await _download_all(url_items, target_dir)
-
-    if not results:
-        raise ValueError("Failed to download media files.")
-
-    return results
+    # Use a single session with proper connection limits
+    connector = aiohttp.TCPConnector(limit=10)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        await asyncio.gather(*[_dl(session, item) for item in items])
+        
+    return [i for i in items if "bytes" in i]
 
 # ── Telegram Handler ─────────────────────────────────────────────────────────
 
@@ -218,65 +113,44 @@ async def handle_instagram(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if not match:
         return False
 
-    url = match.group(0)
-    status_msg = await message.reply_text("⏳ Downloading…")
-    tmp_dir = tempfile.mkdtemp()
+    status_msg = await message.reply_text("⏳ Processing…")
 
     try:
-        shortcode = _extract_shortcode(url)
-        results = await _fetch_post(shortcode, tmp_dir)
+        shortcode = _extract_shortcode(match.group(0))
+        results = await _fetch_and_download(shortcode)
 
-        for r in results:
-            if r["size"] > MAX_VIDEO_SIZE:
-                await status_msg.edit_text("❌ File too large (max 50 MB).")
-                return True
+        if not results:
+            raise ValueError("Failed to download media files.")
+
+        if any(r.get("size", 0) > MAX_VIDEO_SIZE for r in results):
+            await status_msg.edit_text("❌ File too large (max 50 MB).")
+            return True
 
         await status_msg.edit_text("📤 Uploading…")
 
         if len(results) == 1:
             item = results[0]
-            cap = _make_caption(item.get("caption", ""))
-
-            with open(item["path"], "rb") as fh:
-                if item["type"] == "video":
-                    await message.reply_video(video=fh, caption=cap)
-                else:
-                    await message.reply_photo(photo=fh, caption=cap)
-
+            if item["type"] == "video":
+                await message.reply_video(video=item["bytes"], caption=item["caption"])
+            else:
+                await message.reply_photo(photo=item["bytes"], caption=item["caption"])
         else:
-            handles, media = [], []
-
-            for i, item in enumerate(results):
-                fh = open(item["path"], "rb")
-                handles.append(fh)
-
-                cap = _make_caption(item.get("caption", "")) if i == 0 else ""
-
-                media.append(
-                    InputMediaVideo(fh, cap)
-                    if item["type"] == "video"
-                    else InputMediaPhoto(fh, cap)
-                )
-
-            try:
-                await message.reply_media_group(media=media)
-            finally:
-                for fh in handles:
-                    fh.close()
-
-        await status_msg.delete()
+            media = [
+                InputMediaVideo(r["bytes"], caption=r["caption"]) if r["type"] == "video" 
+                else InputMediaPhoto(r["bytes"], caption=r["caption"])
+                for r in results
+            ]
+            await message.reply_media_group(media=media)
 
     except Exception as e:
         err = str(e).lower()
-
         if "private" in err or "not found" in err:
             await status_msg.edit_text("❌ Post not found or private.")
         elif "rate" in err or "429" in err:
             await status_msg.edit_text("❌ Rate limited. Try later.")
         else:
             await status_msg.edit_text("❌ Download failed.")
-
     finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
+        await status_msg.delete()
 
     return True

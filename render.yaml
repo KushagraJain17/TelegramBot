@@ -12,6 +12,8 @@ services:
         sync: false
       - key: INSTA_PASS
         sync: false
+      - key: INSTA_SESSION64
+        sync: false
       - key: MAX_FILESIZE_MB
         value: "50"
     autoDeploy: true
